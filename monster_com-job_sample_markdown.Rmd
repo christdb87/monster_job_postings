@@ -1,0 +1,164 @@
+---
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(stringr)
+library(ggvis)
+
+```
+
+# Analysis of a sample of Monster.com job postings
+
+Sample of a kaggle dataset of job postings. 
+
+
+``` {r read, echo=TRUE} 
+
+# Load data and drop unnecessary columns
+
+df <- read.csv('monster_com-job_sample.csv', stringsAsFactors = FALSE, na.strings = '') 
+
+df <- df %>% select(job_description,
+                    job_type,
+                    location,
+                    organization,
+                    salary,
+                    sector)
+
+glimpse(df)
+
+```
+
+
+Some rows have the location in the organization column, so we have to move those over. To do this, we'll get rid of the zip codes and then move the 'organization' to the 'location' column if it can be found anywhere in the location column.
+
+
+```{r cars, echo=TRUE}
+
+# how many in organization is found in location before removing zip code
+
+sum(df$organization %in% df$location & !is.na(df$organization))
+
+# remove zip codes
+
+df$location <- sub('\\d{5}', '', df$location)
+df$organization <- sub('\\d{5}', '', df$organization)
+
+# how many are found after
+
+sum(df$organization %in% df$location & !is.na(df$organization))
+
+# move the values over
+
+df[((df$organization %in% df$location) && (!is.na(df$organization))), 'location'] <-
+  df[((df$organization %in% df$location) && (!is.na(df$organization))), 'organization']
+
+# separate state into its own column
+
+df$state <- lapply(1:length(df$location), function(x) {
+  if (str_extract(df[x, 'location'], '[[:upper:]]{2}') %>% str_trim() %in% state.abb) {
+  str_extract(df[x, 'location'], '[[:upper:]]{2}') %>% str_trim()
+  }
+  else
+  NA
+}) %>% unlist()
+
+# count of jobs grouped by state
+```
+
+``` {r state, echo=TRUE, fig.width = 10}
+df %>% group_by(state) %>% summarize(jobs = n()) %>% ggvis(~state, ~jobs, fill := 'coral') %>% layer_bars()
+```
+
+The dataset is 22,000 observations, but 84.3% of those don't have salary information. Those with salary information have it in different formats. Some are hourly, some are yearly, some have a range of salaries, and some don't specify an amount. I'll have to try to separate ranged salaries and standardize hourly/yearly salaries.
+
+```{r pressure, echo=TRUE, message=TRUE, warning=FALSE}
+
+# remove commas from salary column
+
+df$salary <- gsub(',', '', df$salary)
+
+# add salary type of yearly or hourly
+
+df$salary_type <- lapply(1:length(df$salary), function(x) {
+  if (grepl('year', df[x, 'salary']) == TRUE) {
+    'yearly'
+  }
+  else if (grepl('hour', df[x, 'salary']) == TRUE)
+    'hourly'
+  else
+    NA
+}) %>% unlist()
+
+# add min column
+
+df$min <- lapply(1:length(df$salary), function(x) {
+  if (length(str_extract_all(df[x, 'salary'], '\\d+.\\d+')[[1]]) > 1  && (!is.na(df[x, 'salary']))) {
+    str_extract_all(df[x, 'salary'], '\\d+.\\d+')[[1]][1]
+  }
+  else
+    NA
+}) %>% unlist() %>% as.numeric()
+
+df$max <- lapply(1:length(df$salary), function(x) {
+  if (length(str_extract_all(df[x, 'salary'], '\\d+.\\d+')[[1]]) > 1  && (!is.na(df[x, 'salary']))) {
+    str_extract_all(df[x, 'salary'], '\\d+.\\d+')[[1]][2]
+  }
+  else
+    NA
+}) %>% unlist() %>% as.numeric()
+
+# some of the mins are 0, remove those
+
+df[df$min == 0 & !is.na(df$min), 'min'] <- NA
+
+# convert yearly salaries to hourly
+
+for (i in 1:nrow(df)) {
+  if (df[i, 'salary_type'] == 'hourly' && !is.na(df[i, 'salary_type'])) {
+    df[i, 'max'] <- df[i, 'max'] * 2080
+    df[i, 'min'] <- df[i, 'min'] * 2080
+  }
+}
+
+# new column with mean of min/max
+
+df <- df %>% mutate(avg = (min + max) / 2)
+
+# find outliers in wages
+
+df %>% arrange(desc(avg)) %>% head(n=10) %>% select(avg)
+
+# remove any average wage over 1,000,000 and under 10,000. They were probably entered incorrectly
+
+df$avg <- lapply(1:length(df$avg), function(x) {
+  if (df[x,'avg'] >= 1000000  && (!is.na(df[x, 'avg']))) {
+    NA
+  } else if (df[x,'avg'] <= 10000  && (!is.na(df[x, 'avg']))) {
+    NA
+  }
+  else
+    df[x,'avg']
+}) %>% unlist() %>% as.numeric()
+
+```
+
+```{r wages, echo=T, fig.width=10}
+# average of wages by state (with over 5 salaries)
+
+df %>% group_by(state) %>% filter(sum(!is.na(avg)) >5) %>% summarize(wages = mean(avg, na.rm = T)) %>% ggvis(~state, ~wages, fill := 'coral') %>% layer_bars()
+
+
+```
+
+```{r sector, echo=T, fig.width=10, fig.height=8}
+# average of wages by sector (with over 5 salaries)
+
+df %>% group_by(sector) %>% filter(!is.na(sector), !is.na(avg), sum(!is.na(avg)) > 5) %>% summarize(wages = mean(avg, na.rm = T)) %>% ggvis(~wages, ~sector, fill := 'coral') %>% layer_rects(x2=0,height = band())
+
+```
+
